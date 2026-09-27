@@ -1,0 +1,31 @@
+[project]
+name = "hermeneia"
+version = "0.1.0"
+description = "Speech translation server for utterance-sized audio"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.141.1",
+    "numpy>=2.2",
+    "python-multipart>=0.0.20",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.optional-dependencies]
+whisper = [
+    "faster-whisper>=1.2.1",
+    "nvidia-cublas-cu12>=12.9.2.10",
+    "nvidia-cuda-runtime-cu12>=12.9.79",
+    "nvidia-cudnn-cu12>=9,<10",
+]
+seamless = [
+    "torch>=2.5",
+    "transformers>=4.46",
+]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
