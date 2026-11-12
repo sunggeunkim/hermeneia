@@ -1,15 +1,89 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 
-from fastapi import FastAPI, Form, Request, UploadFile
+from fastapi import FastAPI, Form, UploadFile
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from hermeneia.translate import TranslateError, Translator
 
 MAX_BODY = 2 * 1024 * 1024
+
+
+class _Guard:
+    """Bearer auth and the body cap for /v1/.
+
+    The cap counts the bytes actually received, not the Content-Length header,
+    so a chunked upload cannot get past it. A capped body is at most 2 MB, so
+    it is buffered here and replayed to the app before any form parsing.
+    """
+
+    def __init__(self, app: ASGIApp, *, token: str | None) -> None:
+        self._app = app
+        self._token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith("/v1/"):
+            await self._app(scope, receive, send)
+            return
+        headers = {key.decode("latin-1"): value.decode("latin-1") for key, value in scope["headers"]}
+        length = headers.get("content-length")
+        if length is not None:
+            try:
+                if int(length) > MAX_BODY:
+                    await _reply(send, 413, "body too large")
+                    return
+            except ValueError:
+                await _reply(send, 400, "bad content-length")
+                return
+        if self._token is not None and headers.get("authorization") != f"Bearer {self._token}":
+            await _reply(send, 401, "missing or invalid token")
+            return
+
+        chunks: list[bytes] = []
+        size = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body = message.get("body", b"")
+            size += len(body)
+            if size > MAX_BODY:
+                await _reply(send, 413, "body too large")
+                return
+            chunks.append(body)
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay() -> Message:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+            return await receive()
+
+        await self._app(scope, replay, send)
+
+
+async def _reply(send: Send, status: int, detail: str) -> None:
+    body = json.dumps({"detail": detail}).encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
 
 
 def create_app(translator: Translator, *, token: str | None) -> FastAPI:
@@ -21,20 +95,7 @@ def create_app(translator: Translator, *, token: str | None) -> FastAPI:
         yield
 
     app = FastAPI(title="hermeneia", lifespan=lifespan)
-
-    @app.middleware("http")
-    async def guard(request: Request, call_next):
-        if request.url.path.startswith("/v1/"):
-            length = request.headers.get("content-length")
-            if length is not None:
-                try:
-                    if int(length) > MAX_BODY:
-                        return JSONResponse({"detail": "body too large"}, status_code=413)
-                except ValueError:
-                    return JSONResponse({"detail": "bad content-length"}, status_code=400)
-            if token is not None and request.headers.get("authorization") != f"Bearer {token}":
-                return JSONResponse({"detail": "missing or invalid token"}, status_code=401)
-        return await call_next(request)
+    app.add_middleware(_Guard, token=token)
 
     @app.get("/health")
     def health() -> dict[str, object]:
@@ -65,9 +126,8 @@ def create_app(translator: Translator, *, token: str | None) -> FastAPI:
         initial_prompt: str = Form(default=""),
         condition_on_previous_text: bool = Form(default=False),
     ) -> dict[str, object]:
-        payload = audio.file.read(MAX_BODY + 1)
-        if len(payload) > MAX_BODY:
-            return JSONResponse({"detail": "body too large"}, status_code=413)
+        # _Guard already capped the whole request at MAX_BODY.
+        payload = audio.file.read()
         kind = "wav" if encoding == "wav" else encoding
         try:
             result = translator.translate(

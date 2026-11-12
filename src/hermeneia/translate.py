@@ -18,6 +18,12 @@ KNOWN_MODELS = ("whisper", "seamless-m4t-v2")
 _LANGUAGES = ("ko", "en")
 _SEAMLESS_LANG = {"ko": "kor", "en": "eng"}
 _SAMPLE_RATE = 16000
+# Input rates outside this band are refused before resampling, so a tiny body
+# with an absurd rate cannot ask for a huge output buffer.
+_MIN_RATE = 8000
+_MAX_RATE = 48000
+# Utterances are about 12 s (README). Leave headroom, but bound the work.
+_MAX_SECONDS = 30.0
 # One forward pass, plus two callers waiting on it. A third waiter is refused.
 _ADMIT = 3
 
@@ -57,6 +63,10 @@ class Status:
 
 
 class _Engine:
+    # The device the weights actually live on, when it can differ from the
+    # configured one (seamless falls back to CPU without CUDA).
+    device: str | None = None
+
     def run(
         self,
         samples: np.ndarray,
@@ -96,24 +106,39 @@ class Translator:
         self._device = device
         self._vram_gb = vram_gb
         self._engine: _Engine | None = None
-        self._resident: str | None = None
+        # Serializes load, unload and inference: one GPU user at a time.
         self._gpu = threading.Lock()
+        # Guards what is resident. Held only for reads and writes of these two
+        # fields, never across a load or a forward pass, so status() does not
+        # wait on the GPU.
+        self._state = threading.Lock()
+        self._resident: str | None = None
+        self._resident_device: str | None = None
         self._admit = threading.Lock()
         self._inflight = 0
 
     def warmup(self) -> None:
+        # The startup load holds the GPU like any request, so it takes a slot.
+        try:
+            self._enter()
+        except TranslateError:
+            logger.warning("skipping warmup: requests already queued")
+            return
         try:
             with self._gpu:
                 self._ensure(self._startup_model)
         except TranslateError:
             logger.exception("startup model failed to load")
+        finally:
+            self._leave()
 
     def status(self) -> Status:
-        with self._gpu:
+        with self._state:
             resident = self._resident
+            device = self._resident_device
         return Status(
             ready=resident is not None,
-            device=self._device,
+            device=device or self._device,
             vram_gb=self._vram_gb,
             resident_model=resident,
             models=tuple(ModelStatus(id=name, loaded=name == resident) for name in KNOWN_MODELS),
@@ -133,6 +158,8 @@ class Translator:
     ) -> Translation:
         self._check_request(model, source_language, target_language)
         samples = _decode(audio, kind=kind, sample_rate=sample_rate)
+        # Only whisper takes a prompt, and only a non-empty one is passed on.
+        prompt = initial_prompt if model == "whisper" else ""
         self._enter()
         try:
             with self._gpu:
@@ -143,7 +170,7 @@ class Translator:
                     samples,
                     source=source_language,
                     target=target_language,
-                    initial_prompt=initial_prompt,
+                    initial_prompt=prompt,
                     condition_on_previous_text=condition_on_previous_text,
                 )
                 inference_ms = int((time.perf_counter() - started) * 1000)
@@ -157,7 +184,7 @@ class Translator:
             duration_s=len(samples) / _SAMPLE_RATE,
             inference_ms=inference_ms,
             load_ms=load_ms,
-            prompt_applied=model == "whisper",
+            prompt_applied=bool(prompt),
         )
 
     def _check_request(self, model: str, source: str, target: str) -> None:
@@ -180,24 +207,30 @@ class Translator:
             self._inflight -= 1
 
     def _ensure(self, model: str) -> int:
+        """Caller holds self._gpu."""
         if self._resident == model and self._engine is not None:
             return 0
         started = time.perf_counter()
         if self._engine is not None:
             previous = self._engine
             self._engine = None
-            self._resident = None
+            self._set_resident(None, None)
             previous.close()
         try:
-            self._engine = self._loaders[model]()
+            engine = self._loaders[model]()
         except Exception as exc:
-            self._engine = None
-            self._resident = None
             logger.exception("failed to load %s", model)
             _log_nvidia_smi()
             raise TranslateError(503, f"failed to load {model}") from exc
-        self._resident = model
-        return int((time.perf_counter() - started) * 1000)
+        load_ms = int((time.perf_counter() - started) * 1000)
+        self._engine = engine
+        self._set_resident(model, getattr(engine, "device", None))
+        return load_ms
+
+    def _set_resident(self, model: str | None, device: str | None) -> None:
+        with self._state:
+            self._resident = model
+            self._resident_device = device
 
 
 def _decode(audio: bytes, *, kind: str, sample_rate: int | None) -> np.ndarray:
@@ -207,7 +240,7 @@ def _decode(audio: bytes, *, kind: str, sample_rate: int | None) -> np.ndarray:
         if kind == "wav" or audio.startswith(b"RIFF"):
             samples, rate = _decode_wav(audio)
         elif kind == "s16le":
-            if sample_rate is None or sample_rate <= 0:
+            if sample_rate is None:
                 raise TranslateError(400, "sample_rate is required for raw pcm")
             if len(audio) % 2:
                 raise TranslateError(400, "pcm length is not a whole number of samples")
@@ -221,6 +254,10 @@ def _decode(audio: bytes, *, kind: str, sample_rate: int | None) -> np.ndarray:
         raise TranslateError(400, "undecodable audio") from exc
     if samples.size == 0:
         raise TranslateError(400, "empty audio")
+    if not _MIN_RATE <= rate <= _MAX_RATE:
+        raise TranslateError(400, f"sample rate must be {_MIN_RATE} to {_MAX_RATE} Hz")
+    if samples.size / rate > _MAX_SECONDS:
+        raise TranslateError(400, f"audio is longer than {_MAX_SECONDS:g} s")
     resampled = _resample(samples, rate)
     if resampled.size == 0:
         raise TranslateError(400, "empty audio")
@@ -233,7 +270,7 @@ def _decode_wav(audio: bytes) -> tuple[np.ndarray, int]:
         width = handle.getsampwidth()
         rate = handle.getframerate()
         frames = handle.readframes(handle.getnframes())
-    if width != 2 or rate <= 0 or channels <= 0:
+    if width != 2 or channels <= 0:
         raise TranslateError(400, "wav must be 16-bit")
     pcm = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
     if channels > 1:
@@ -300,7 +337,9 @@ def load_whisper(model_name: str, device: str, compute_type: str) -> _Engine:
             whisper = None
             gc.collect()
 
-    return _Whisper()
+    engine = _Whisper()
+    engine.device = device
+    return engine
 
 
 def load_seamless(device: str) -> _Engine:
@@ -309,6 +348,8 @@ def load_seamless(device: str) -> _Engine:
 
     use_cuda = device == "cuda" and torch.cuda.is_available()
     torch_device = "cuda" if use_cuda else "cpu"
+    if device == "cuda" and not use_cuda:
+        logger.warning("CUDA unavailable to torch; seamless is loading on CPU")
     dtype = torch.float16 if use_cuda else torch.float32
     checkpoint = "facebook/seamless-m4t-v2-large"
     processor = AutoProcessor.from_pretrained(checkpoint)
@@ -344,32 +385,29 @@ def load_seamless(device: str) -> _Engine:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    return _Seamless()
+    engine = _Seamless()
+    engine.device = torch_device
+    return engine
 
 
 def _add_cuda_libs() -> None:
-    """Linux containers find CTranslate2's CUDA libs via LD_LIBRARY_PATH."""
+    """Windows: let CTranslate2 find the pip CUDA DLLs.
+
+    On Linux the dynamic linker reads LD_LIBRARY_PATH only at process start, so
+    setting it from here would do nothing. The image sets it (deploy/Dockerfile).
+    """
     import os
     import sys
     from pathlib import Path
 
-    roots: list[Path] = []
+    if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
+        return
     try:
         import nvidia
-
-        roots.append(Path(nvidia.__path__[0]))
-    except Exception:
+    except ImportError:
         return
-    lib_dirs = [path for root in roots for path in root.glob("*/lib") if path.is_dir()]
-    if not lib_dirs or not hasattr(os, "environ"):
-        return
-    current = os.environ.get("LD_LIBRARY_PATH", "")
-    extra = os.pathsep.join(str(path) for path in lib_dirs)
-    if extra not in current:
-        os.environ["LD_LIBRARY_PATH"] = extra + (os.pathsep + current if current else "")
-    # Windows loader path, same idea as Metagrafo.
-    if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
-        for root in roots:
-            for bin_dir in root.glob("*/bin"):
-                if bin_dir.is_dir():
-                    os.add_dll_directory(str(bin_dir))
+    for root in nvidia.__path__:
+        for name in ("cublas", "cudnn", "cuda_runtime"):
+            bin_dir = Path(root) / name / "bin"
+            if bin_dir.is_dir():
+                os.add_dll_directory(str(bin_dir))

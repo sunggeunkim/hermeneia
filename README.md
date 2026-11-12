@@ -11,7 +11,7 @@ Two models, one resident at a time:
 
 A request names the model. If it is not the one already on the GPU, Hermeneia unloads that one and loads the requested one. The first request after a switch waits on the load (tens of seconds). Later requests for the same model do not. Keep one model for a whole service.
 
-`POST /v1/translations` takes a WAV or 16 kHz mono `s16le` chunk (Metagrafo's chunks are the second kind, at most about 12 seconds). `GET /health` needs no token. `GET /v1/models` and `POST /v1/translations` need `Authorization: Bearer` when `HERMENEIA_TOKEN` is set.
+`POST /v1/translations` takes a WAV or 16 kHz mono `s16le` chunk (Metagrafo's chunks are the second kind, at most about 12 seconds). The request body is capped at 2 MB, the input rate must be 8–48 kHz, and audio longer than 30 seconds is refused. `GET /health` reports the device the resident model actually loaded on, which is `cpu` if seamless could not reach CUDA. `GET /health` needs no token. `GET /v1/models` and `POST /v1/translations` need `Authorization: Bearer` when `HERMENEIA_TOKEN` is set.
 
 SeamlessM4T v2 weights are CC-BY-NC 4.0.
 

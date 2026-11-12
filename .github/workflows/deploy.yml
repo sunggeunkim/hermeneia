@@ -97,7 +97,7 @@ jobs:
         run: |
           ssh "${{ secrets.LXC_USER }}@${{ secrets.LXC_HOST }}" \
             "for i in \$(seq 1 180); do \
-               body=\$(curl -fsS http://localhost:8080/health || true); \
+               body=\$(curl -fsS --max-time 5 http://localhost:8080/health || true); \
                echo \"\$body\" | grep -q '\"ready\": true' && echo healthy && exit 0; \
                echo \"\$body\" | grep -q '\"ready\":true' && echo healthy && exit 0; \
                sleep 5; \
