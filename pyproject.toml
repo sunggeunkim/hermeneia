@@ -19,14 +19,22 @@ whisper = [
     "nvidia-cuda-runtime-cu12>=12.4",
     "nvidia-cudnn-cu12>=9,<10",
 ]
+# The checkpoint ships only a SentencePiece tokenizer.model. transformers 5
+# converts it at load time with sentencepiece and protobuf; without them it
+# falls through to a tiktoken reader and the load fails.
 seamless = [
+    "protobuf>=4",
+    "sentencepiece>=0.2",
     "torch>=2.5",
     "transformers>=5",
 ]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.0",
-    # No torch: enough to run the real Seamless processor in tests.
+    # No torch: enough to run the real Seamless processor and tokenizer in
+    # tests. tests/test_seamless_processor.py checks these stay in `seamless`.
+    "protobuf>=4",
+    "sentencepiece>=0.2",
     "transformers>=5",
 ]
 

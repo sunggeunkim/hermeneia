@@ -22,15 +22,29 @@ def detect_vram_gb() -> float | None:
         return None
 
 
+def _positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a whole number, got {raw!r}") from None
+    if value < 1:
+        raise ValueError(f"{name} must be at least 1, got {value}")
+    return value
+
+
 def build_translator() -> Translator:
     whisper_model = os.environ.get("WHISPER_MODEL", "large-v3")
     compute = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
     device = os.environ.get("HERMENEIA_DEVICE", "cuda")
     startup = os.environ.get("HERMENEIA_MODEL", "whisper")
+    seamless_beams = _positive_int("SEAMLESS_NUM_BEAMS", 5)
     return Translator(
         {
             "whisper": lambda: load_whisper(whisper_model, device, compute),
-            "seamless-m4t-v2": lambda: load_seamless(device),
+            "seamless-m4t-v2": lambda: load_seamless(device, num_beams=seamless_beams),
         },
         startup_model=startup,
         device=device,
