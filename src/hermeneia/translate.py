@@ -347,7 +347,11 @@ def _seamless_features(processor: object, samples: np.ndarray, *, return_tensors
     return processor(audio=samples, sampling_rate=_SAMPLE_RATE, return_tensors=return_tensors)  # type: ignore[operator]
 
 
-def load_seamless(device: str) -> _Engine:
+def load_seamless(device: str, num_beams: int = 5) -> _Engine:
+    """Greedy decoding (num_beams=1) often stops after the first sentence of
+    Korean output; beam search keeps the rest for a few hundred ms."""
+    if num_beams < 1:
+        raise ValueError("num_beams must be at least 1")
     import torch
     from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToText
 
@@ -376,7 +380,11 @@ def load_seamless(device: str) -> _Engine:
             features = _seamless_features(processor, samples)
             features = {key: value.to(torch_device) for key, value in features.items()}
             with torch.inference_mode():
-                tokens = weights.generate(**features, tgt_lang=_SEAMLESS_LANG[target])
+                tokens = weights.generate(
+                    **features,
+                    tgt_lang=_SEAMLESS_LANG[target],
+                    num_beams=num_beams,
+                )
             return processor.decode(tokens[0], skip_special_tokens=True).strip()
 
         def close(self) -> None:

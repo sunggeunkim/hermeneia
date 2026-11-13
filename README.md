@@ -13,6 +13,8 @@ A request names the model. If it is not the one already on the GPU, Hermeneia un
 
 `POST /v1/translations` takes a WAV or 16 kHz mono `s16le` chunk (Metagrafo's chunks are the second kind, at most about 12 seconds). The request body is capped at 2 MB, the input rate must be 8–48 kHz, and audio longer than 30 seconds is refused. `GET /health` reports the device the resident model actually loaded on, which is `cpu` if seamless could not reach CUDA. `GET /health` needs no token. `GET /v1/models` and `POST /v1/translations` need `Authorization: Bearer` when `HERMENEIA_TOKEN` is set.
 
+Seamless decodes with beam search, 5 beams by default (`SEAMLESS_NUM_BEAMS`). With greedy decoding (`1`) it often stops after the first sentence of Korean output. Its text vocabulary also lacks some Korean syllables, for example 녕, so "안녕하세요" comes out as "안하세요"; no setting fixes that.
+
 SeamlessM4T v2 weights are CC-BY-NC 4.0.
 
 ## Local
