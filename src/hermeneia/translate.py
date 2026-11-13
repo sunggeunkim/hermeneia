@@ -342,6 +342,11 @@ def load_whisper(model_name: str, device: str, compute_type: str) -> _Engine:
     return engine
 
 
+def _seamless_features(processor: object, samples: np.ndarray, *, return_tensors: str = "pt"):
+    # transformers 5 takes `audio`; the old `audios` keyword raises ValueError.
+    return processor(audio=samples, sampling_rate=_SAMPLE_RATE, return_tensors=return_tensors)  # type: ignore[operator]
+
+
 def load_seamless(device: str) -> _Engine:
     import torch
     from transformers import AutoProcessor, SeamlessM4Tv2ForSpeechToText
@@ -368,7 +373,7 @@ def load_seamless(device: str) -> _Engine:
             condition_on_previous_text: bool,
         ) -> str:
             del source, initial_prompt, condition_on_previous_text
-            features = processor(audios=samples, sampling_rate=_SAMPLE_RATE, return_tensors="pt")
+            features = _seamless_features(processor, samples)
             features = {key: value.to(torch_device) for key, value in features.items()}
             with torch.inference_mode():
                 tokens = weights.generate(**features, tgt_lang=_SEAMLESS_LANG[target])

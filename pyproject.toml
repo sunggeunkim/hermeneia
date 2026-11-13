@@ -21,11 +21,13 @@ whisper = [
 ]
 seamless = [
     "torch>=2.5",
-    "transformers>=4.46",
+    "transformers>=5",
 ]
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.0",
+    # No torch: enough to run the real Seamless processor in tests.
+    "transformers>=5",
 ]
 
 [build-system]
