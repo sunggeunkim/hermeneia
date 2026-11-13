@@ -1,0 +1,25 @@
+services:
+  hermeneia:
+    image: ghcr.io/sunggeunkim/hermeneia:${IMAGE_TAG:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    env_file: ./.env
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8080"
+      HF_HOME: /models/hf
+      HUGGINGFACE_HUB_CACHE: /models/hf
+    volumes:
+      - model_cache:/models
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  model_cache:
