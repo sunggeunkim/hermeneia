@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from hermeneia import seamless_guard
+
 logger = logging.getLogger(__name__)
 
 KNOWN_MODELS = ("whisper", "seamless-m4t-v2")
@@ -377,6 +379,11 @@ def load_seamless(device: str, num_beams: int = 5) -> _Engine:
             condition_on_previous_text: bool,
         ) -> str:
             del source, initial_prompt, condition_on_previous_text
+            seconds = samples.size / _SAMPLE_RATE
+            speech = seamless_guard.speech_seconds(samples)
+            if speech < seamless_guard.MIN_SPEECH_SECONDS:
+                logger.info("seamless skipped: %.2f s of speech in %.2f s", speech, seconds)
+                return ""
             features = _seamless_features(processor, samples)
             features = {key: value.to(torch_device) for key, value in features.items()}
             with torch.inference_mode():
@@ -384,8 +391,10 @@ def load_seamless(device: str, num_beams: int = 5) -> _Engine:
                     **features,
                     tgt_lang=_SEAMLESS_LANG[target],
                     num_beams=num_beams,
+                    **seamless_guard.generation_limits(seconds),
                 )
-            return processor.decode(tokens[0], skip_special_tokens=True).strip()
+            text = processor.decode(tokens[0], skip_special_tokens=True)
+            return seamless_guard.finish(text, target=target)
 
         def close(self) -> None:
             nonlocal weights
